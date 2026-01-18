@@ -30,13 +30,21 @@ st.markdown("""
 # 1. Google Sheets 連線
 try:
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
-    creds = Credentials.from_service_account_file("google_key.json", scopes=scope)
-    gc = gspread.authorize(creds)
+    
+    # 修正：改從 Streamlit Secrets 讀取金鑰，而不是讀取本地檔案
+    if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
+        # 將 st.secrets 轉換為標準字典格式
+        key_dict = dict(st.secrets["connections"]["gsheets"])
+        creds = Credentials.from_service_account_info(key_dict, scopes=scope)
+        gc = gspread.authorize(creds)
+    else:
+        st.error("⚠️ 未在 Secrets 中找到 Google Sheets 設定")
+        gc = None
+        
 except Exception as e:
     st.error(f"⚠️ Google Sheets 連線失敗: {e}")
-    st.info("請確認 google_key.json 是否存在於資料夾中")
     gc = None
-    st.stop()
+    # 這裡不 stop，讓程式可以繼續跑其他部分
 
 # 2. Gemini AI 連線 (新版 Client 寫法)
 try:
@@ -485,5 +493,6 @@ else:
 
 st.markdown("---")
 st.caption("🧪 2026 PLAN | Powered by Gemini & Google Sheets")
+
 
 
