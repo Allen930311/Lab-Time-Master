@@ -4,49 +4,95 @@ import yfinance as yf
 from datetime import datetime, timedelta
 import gspread
 from google.oauth2.service_account import Credentials
-from google import genai # ✅ 使用新版 AI 套件
+from google import genai
 from google.genai import types
 import json
 import time
+import random
+import arxiv
 
 # ============================================================
 # ⚙️ 頁面設定
 # ============================================================
 st.set_page_config(page_title="2026 PLAN", page_icon="🧪", layout="wide")
 
-# CSS 美化
+# ============================================================
+# 🎨 UI 高級化工程 (CSS)
+# ============================================================
 st.markdown("""
 <style>
-    .main { background-color: #0e1117; }
-    .stButton > button { border-radius: 8px; font-weight: bold; }
-    .quiz-card { background-color: #1e1e1e; padding: 20px; border-radius: 10px; border: 1px solid #333; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400;700&display=swap');
+
+    html, body, [class*="css"] {
+        font-family: 'Inter', sans-serif;
+    }
+
+    .stApp {
+        background: radial-gradient(circle at 10% 20%, #1a1c2e 0%, #0e1117 90%);
+    }
+
+    /* 高級感卡片 */
+    .glass-card {
+        background: rgba(255, 255, 255, 0.05);
+        backdrop-filter: blur(10px);
+        -webkit-backdrop-filter: blur(10px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 16px;
+        padding: 20px;
+        margin-bottom: 15px;
+        box-shadow: 0 4px 30px rgba(0, 0, 0, 0.3);
+    }
+    
+    .quiz-card {
+        background-color: #1e1e1e;
+        padding: 20px;
+        border-radius: 10px;
+        border: 1px solid #333;
+        margin-bottom: 20px;
+    }
+
+    /* 按鈕優化 */
+    .stButton > button {
+        background: linear-gradient(90deg, #2563eb 0%, #3b82f6 100%);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    .stButton > button:hover {
+        transform: scale(1.02);
+        box-shadow: 0 6px 20px rgba(37, 99, 235, 0.5);
+    }
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 🔑 核心連線設定 (最穩定版)
+# 🔑 核心連線設定 (Secrets 優先)
 # ============================================================
 
 # 1. Google Sheets 連線
 try:
     scope = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
     
-    # 修正：改從 Streamlit Secrets 讀取金鑰，而不是讀取本地檔案
+    # 優先從 Streamlit Secrets 讀取
     if "connections" in st.secrets and "gsheets" in st.secrets["connections"]:
-        # 將 st.secrets 轉換為標準字典格式
         key_dict = dict(st.secrets["connections"]["gsheets"])
         creds = Credentials.from_service_account_info(key_dict, scopes=scope)
         gc = gspread.authorize(creds)
+    # 本地開發備用 (google_key.json) - 記得將此檔案加入 .gitignore
     else:
-        st.error("⚠️ 未在 Secrets 中找到 Google Sheets 設定")
-        gc = None
-        
+        try:
+            creds = Credentials.from_service_account_file("google_key.json", scopes=scope)
+            gc = gspread.authorize(creds)
+        except FileNotFoundError:
+            # 如果連本地檔案都沒有，就設為 None，讓程式不崩潰但顯示警告
+            gc = None
 except Exception as e:
     st.error(f"⚠️ Google Sheets 連線失敗: {e}")
     gc = None
-    # 這裡不 stop，讓程式可以繼續跑其他部分
 
-# 2. Gemini AI 連線 (新版 Client 寫法)
+# 2. Gemini AI 連線
 try:
     if "GEMINI_API_KEY" in st.secrets:
         ai_client = genai.Client(api_key=st.secrets["GEMINI_API_KEY"])
@@ -69,40 +115,30 @@ def get_current_quarter():
     elif month <= 9: return 3
     else: return 4
 
-# --- Google Sheets 讀取 (防錯核心) ---
+# --- Google Sheets 讀取 ---
 @st.cache_data(ttl=60)
 def load_data_from_gsheet(worksheet_name):
-    """
-    使用 get_values() 取代 get_all_records()
-    這是解決 <Response [200]> 錯誤的關鍵
-    """
     if not gc: return pd.DataFrame()
     try:
         sh = gc.open("Lab_Time_Master_DB")
         try:
             worksheet = sh.worksheet(worksheet_name)
         except:
-            return pd.DataFrame() # 找不到分頁回傳空
+            return pd.DataFrame() 
 
-        # ✅ 關鍵修改：抓取原始資料列
         rows = worksheet.get_values()
-        
-        # 檢查是否為空或只有標題
         if not rows or len(rows) < 2:
             return pd.DataFrame()
             
         header = rows[0]
         data = rows[1:]
-        
         df = pd.DataFrame(data, columns=header)
         
-        # 日期處理
         if '日期' in df.columns:
             df['Date_Obj'] = pd.to_datetime(df['日期'], errors='coerce').dt.date
             
         return df
     except Exception as e:
-        print(f"DEBUG: 讀取 {worksheet_name} 錯誤: {e}")
         return pd.DataFrame()
 
 # --- Google Sheets 寫入 ---
@@ -158,34 +194,185 @@ def get_market_data():
     except:
         return None
 
-# --- AI 語言學習 (新版 SDK) ---
-def fetch_ai_word_quiz(language):
+# --- arXiv 論文抓取 ---
+def fetch_daily_papers():
+    """每天抓取最新的化學相關論文"""
+    try:
+        client = arxiv.Client()
+        search = arxiv.Search(
+            query = 'cat:physics.chem-ph OR all:chemistry',
+            max_results = 5,
+            sort_by = arxiv.SortCriterion.SubmittedDate
+        )
+        papers = []
+        for result in client.results(search):
+            papers.append([
+                result.published.strftime("%Y-%m-%d"),
+                result.title,
+                ", ".join([a.name for a in result.authors[:3]]),
+                result.summary.replace("\n", " ")[:200] + "...",
+                result.entry_id
+            ])
+        return papers
+    except Exception as e:
+        print(f"arXiv Error: {e}")
+        return []
+
+def update_papers_if_new():
+    if not gc: return None
+    df_papers = load_data_from_gsheet("Papers")
+    today_str = get_taiwan_time().strftime("%Y-%m-%d")
+    
+    need_update = False
+    if df_papers.empty:
+        need_update = True
+    else:
+        if '日期' in df_papers.columns:
+            last_date = str(df_papers.iloc[-1]['日期'])
+            if last_date != today_str:
+                need_update = True
+        else:
+            need_update = True
+
+    if need_update:
+        new_papers = fetch_daily_papers()
+        if not new_papers: return False
+        try:
+            sh = gc.open("Lab_Time_Master_DB")
+            try:
+                ws = sh.worksheet("Papers")
+            except:
+                ws = sh.add_worksheet(title="Papers", rows=1000, cols=5)
+                ws.append_row(['日期', '標題', '作者', '摘要', '連結'])
+            
+            for paper in new_papers:
+                # 簡單防重複：只寫入今天的
+                if paper[0] == today_str:
+                    ws.append_row(paper)
+            
+            st.toast(f"✅ 已更新今日 ({today_str}) 論文！")
+            st.cache_data.clear()
+            return True
+        except Exception as e:
+            st.error(f"論文更新失敗: {e}")
+            return False
+    return False
+
+# ============================================================
+# 🤖 AI 強化版核心函式
+# ============================================================
+
+# --- 1. AI 每日任務 ---
+@st.cache_data(ttl=3600*6)
+def fetch_ai_daily_tasks(weekday_str):
+    if not ai_client: return None
+    
+    strategies = {
+        "Monday": "今天是啟動日，重點在於規劃與專注。",
+        "Tuesday": "今天是執行日，重點在於 Deep Work。",
+        "Wednesday": "今天是小週末，重點在於檢查進度。",
+        "Thursday": "今天是衝刺日，重點在於攻克難題。",
+        "Friday": "今天是總結日，重點在於收尾。",
+        "Saturday": "今天是創作與學習日，重點在於跨領域。",
+        "Sunday": "今天是休息與佈局日，重點在於恢復。"
+    }
+    strategy = strategies.get(weekday_str, "保持專注。")
+    
+    prompt = f"""
+    角色：時間管理教練。
+    學員：化學研究生(有機金屬)、加密貨幣交易員(Python量化)、日德語學習者。
+    情境：今天是 {weekday_str}。{strategy}
+    任務：生成 3 個具體任務 (Research, Coding, Growth)。
+    回傳格式：JSON Array
+    [
+        {{"name": "標題", "type": "🧪 研究", "desc": "描述", "style": "info"}},
+        {{"name": "標題", "type": "💻 程式", "desc": "描述", "style": "success"}},
+        {{"name": "標題", "type": "📚 自我提升", "desc": "描述", "style": "warning"}}
+    ]
+    """
+    try:
+        response = ai_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(response_mime_type="application/json")
+        )
+        if response.text: return json.loads(response.text)
+        return None
+    except:
+        return None
+
+# --- 2. AI 單字測驗 (防重複 & 隨機情境) ---
+def get_learned_words_history(lang):
+    if not gc: return []
+    try:
+        df = load_data_from_gsheet("Logs")
+        if df.empty or '輸入' not in df.columns: return []
+        words = []
+        filter_key = "日文" if "日" in lang else ("德" if "德" in lang else "英")
+        target_rows = df[df['類別'].astype(str).str.contains(filter_key, na=False)]
+        for content in target_rows['輸入']:
+            if "學習單字:" in str(content):
+                words.append(str(content).split("學習單字:")[-1].strip())
+        return words[-60:]
+    except:
+        return []
+
+def fetch_ai_word_quiz(language, difficulty="N4/A2"):
     if not ai_client: 
         st.warning("請先設定 GEMINI_API_KEY")
         return None
     
+    topics = ["實驗室", "投資", "旅遊", "餐廳", "緊急狀況", "科技", "情緒", "天氣", "職場"]
+    selected_topic = random.choice(topics)
+    exclude_list = get_learned_words_history(language)
+    exclude_str = ", ".join(exclude_list) if exclude_list else "無"
+
     prompt = f"""
-    請生成一個 {language} 單字，程度適合初學者 (N4/A1)。
-    請回傳純 JSON 格式，不要 markdown，欄位包含：
-    word (單字), reading (發音), meaning (中文意思), example (例句), example_meaning (例句中譯),
-    quiz_question (選擇題題目), options (四個選項陣列), answer_index (正確索引 0-3)
-    """
+    角色：嚴格的 {language} 老師。
+    任務：出一個「單字測驗」。
+    主題：{selected_topic}
+    程度：{difficulty}
+    排除名單：[{exclude_str}]
     
+    回傳 JSON：
+    {{
+        "word": "單字",
+        "reading": "發音/假名",
+        "meaning": "中文意思",
+        "example": "例句",
+        "example_meaning": "例句中譯",
+        "quiz_question": "選擇題題目",
+        "options": ["A", "B", "C", "D"],
+        "answer_index": 正確索引(0-3)
+    }}
+    """
     try:
-        # ✅ 新版呼叫方式
         response = ai_client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
-                response_mime_type="application/json"
+                response_mime_type="application/json",
+                temperature=1.1
             )
         )
-        if response.text:
-             return json.loads(response.text)
+        if response.text: return json.loads(response.text)
         return None
     except Exception as e:
-        st.error(f"AI 生成失敗: {e}")
-        return None
+        error_str = str(e)
+        if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            st.warning("⏳ AI 額度用完，切換至離線題庫")
+            return get_offline_quiz(language)
+        else:
+            st.error(f"AI Error: {e}")
+            return None
+
+def get_offline_quiz(language):
+    # 簡單的離線題庫備用
+    offline_quizzes = {
+        "日文": [{"word": "研究 (けんきゅう)", "reading": "けんきゅう", "meaning": "研究", "example": "...", "example_meaning": "...", "quiz_question": "研究?", "options": ["A","B","C","D"], "answer_index": 0}],
+        "英文": [{"word": "Experiment", "reading": "...", "meaning": "實驗", "example": "...", "example_meaning": "...", "quiz_question": "Meaning?", "options": ["Test","Run","Eat","Sleep"], "answer_index": 0}]
+    }
+    return random.choice(offline_quizzes.get(language, offline_quizzes["英文"]))
 
 # --- UI 元件：水罐 ---
 def render_water_jar(current, target, label, unit="", color="#4facfe"):
@@ -197,7 +384,6 @@ def render_water_jar(current, target, label, unit="", color="#4facfe"):
             width: 80px; height: 120px; 
             border: 4px solid #555; border-top: 0; border-radius: 0 0 15px 15px;
             background: rgba(255,255,255,0.05); position: relative; overflow: hidden;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
         ">
             <div style="
                 position: absolute; bottom: 0; left: 0; right: 0;
@@ -205,12 +391,10 @@ def render_water_jar(current, target, label, unit="", color="#4facfe"):
                 background: linear-gradient(180deg, {color} 0%, {color}88 100%);
                 transition: height 1s ease-in-out;
                 opacity: 0.8;
-            ">
-                <div style="width: 100%; height: 5px; background: rgba(255,255,255,0.3);"></div>
-            </div>
+            "></div>
             <div style="
                 position: absolute; top: 50%; left: 0; right: 0; transform: translateY(-50%);
-                text-align: center; font-weight: bold; text-shadow: 1px 1px 2px black; color: white; z-index: 2;
+                text-align: center; font-weight: bold; color: white; z-index: 2;
             ">
                 {percentage:.0f}%
             </div>
@@ -225,34 +409,25 @@ def render_water_jar(current, target, label, unit="", color="#4facfe"):
 # --- 週曆視圖 ---
 def render_weekly_view(df):
     if df.empty:
-        st.info("尚無資料可顯示週曆")
+        st.info("尚無資料")
         return
-
     today = get_taiwan_time().date()
     start_of_week = today - timedelta(days=today.weekday())
-    
     cols = st.columns(7)
     week_days = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
-    
     for i in range(7):
         current_day = start_of_week + timedelta(days=i)
         with cols[i]:
-            if current_day == today:
-                st.markdown(f":orange[**{week_days[i]}**]")
-            else:
-                st.markdown(f"**{week_days[i]}**")
+            if current_day == today: st.markdown(f":orange[**{week_days[i]}**]")
+            else: st.markdown(f"**{week_days[i]}**")
             
             if 'Date_Obj' in df.columns:
                 day_data = df[df['Date_Obj'] == current_day]
                 if not day_data.empty:
                     for _, row in day_data.iterrows():
-                        category = str(row.get('類別', ''))
-                        content = str(row.get('輸入', ''))[:6] + ".."
-                        if "研究" in category: st.info(f"🧪 {content}")
-                        elif "程式" in category: st.success(f"💻 {content}")
-                        elif "日文" in category or "德語" in category: st.warning(f"🗣️ {content}")
-                        elif "理財" in category: st.success(f"📈 {content}")
-                        else: st.caption(f"📝 {content}")
+                        content = str(row.get('輸入', ''))
+                        display = "✅" if "完成:" in content else "📝"
+                        st.caption(display)
                 else:
                     st.markdown("<div style='color:#333;'>.</div>", unsafe_allow_html=True)
 
@@ -266,49 +441,40 @@ with st.sidebar:
     if market_data:
         col_btc.metric("BTC", f"${market_data.get('btc_price', 0):,.0f}", f"{market_data.get('btc_change', 0):+.1f}%")
         col_stock.metric("006208", f"{market_data.get('stock_price', 0):.1f}", f"{market_data.get('stock_change', 0):+.1f}%")
-    else:
-        st.caption("載入報價中...")
 
     st.markdown("---")
-    
-    # 💰 水罐與財務
     st.markdown("## 📊 累積資產")
     
     df_finance = load_data_from_gsheet("Finance")
-    total_saved = 0
-    if not df_finance.empty and '金額' in df_finance.columns:
-        df_finance['金額'] = pd.to_numeric(df_finance['金額'], errors='coerce').fillna(0)
-        total_saved = df_finance['金額'].sum()
+    total_saved = df_finance['金額'].astype(float).sum() if not df_finance.empty and '金額' in df_finance.columns else 0
     
     df_logs = load_data_from_gsheet("Logs")
-    lang_count = 0
+    total_xp = 0
     if not df_logs.empty and '類別' in df_logs.columns:
-        lang_count = len(df_logs[df_logs['類別'].astype(str).str.contains('日文|德語|英文')])
+        lang_count = len(df_logs[df_logs['類別'].astype(str).str.contains('日文|德語|英文|學習')])
+        task_bonus = len(df_logs[df_logs['輸入'].astype(str).str.contains('完成:')])
+        total_xp = lang_count + task_bonus
 
     col_jar1, col_jar2 = st.columns(2)
-    with col_jar1:
-        render_water_jar(total_saved, 100000, "存錢計畫", "$", "#4caf50")
-    with col_jar2:
-        render_water_jar(lang_count, 50, "語言等級", "xp", "#2196f3")
+    with col_jar1: render_water_jar(total_saved, 100000, "存錢", "$", "#4caf50")
+    with col_jar2: render_water_jar(total_xp, 100, "知識", "XP", "#2196f3")
 
-    with st.expander("💰 存入小豬撲滿", expanded=False):
-        save_amount = st.number_input("本月存入", min_value=0, step=100)
-        save_note = st.text_input("備註 (來源)")
-        if st.button("存入!", type="primary"):
-            if save_amount > 0:
-                if save_savings_to_gsheet(get_taiwan_time().date(), save_amount, save_note):
-                    st.success("存入成功！")
-                    time.sleep(1)
-                    st.rerun()
+    with st.expander("💰 存入小豬撲滿"):
+        save_amount = st.number_input("金額", min_value=0, step=100)
+        save_note = st.text_input("備註")
+        if st.button("存入", type="primary"):
+            if save_amount > 0 and save_savings_to_gsheet(get_taiwan_time().date(), save_amount, save_note):
+                st.success("成功！")
+                time.sleep(1)
+                st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🧮 月預算試算")
+    st.markdown("### 🧮 月預算")
     income = 25000
-    food_expense = st.number_input("🍱 伙食費", value=15000, step=500, key="food")
-    fun_expense = st.number_input("🎮 娛樂/旅遊", value=5000, step=500, key="fun")
+    food_expense = st.number_input("🍱 伙食", value=15000, step=500)
+    fun_expense = st.number_input("🎮 娛樂", value=5000, step=500)
     balance = income - food_expense - fun_expense
-    balance_color = "#4caf50" if balance >= 0 else "#f44336"
-    st.markdown(f"**結餘:** <span style='color:{balance_color}; font-weight:bold;'>${balance:,}</span>", unsafe_allow_html=True)
+    st.markdown(f"**結餘:** ${balance:,}")
 
 # ============================================================
 # 🏠 主畫面 Main Area
@@ -320,179 +486,182 @@ today_zh = weekday_map.get(today_weekday, today_weekday)
 st.title("🧪 實驗室時間管理大師 2.0")
 st.markdown(f"#### *今天是 **{today_zh}**，讓 AI 陪你累積資產與知識！*")
 
-# 📅 今日任務
-st.markdown("---")
-st.markdown("## 📅 今日任務提醒")
+# --- 自動觸發：論文更新檢查 ---
+if 'papers_checked' not in st.session_state:
+    update_papers_if_new()
+    st.session_state.papers_checked = True
 
-if today_weekday in ["Monday", "Wednesday", "Friday"]:
-    cols = st.columns(3)
-    with cols[0]: st.info("🧪 **實驗室/上課**")
-    with cols[1]: st.success("💪 **健身 1hr**\n胸推/伏地挺身")
-    with cols[2]: st.warning("🇯🇵 **日語 30min**\nAPI 測驗啟動")
-elif today_weekday in ["Tuesday", "Thursday"]:
-    cols = st.columns(3)
-    with cols[0]: st.info("🧪 **實驗室/上課**")
-    with cols[1]: st.success("💻 **Python/交易 1.5hr**\n回測腳本")
-    with cols[2]: st.warning("🇩🇪 **德語 30min**\nAPI 測驗啟動")
-elif today_weekday == "Saturday":
-    cols = st.columns(2)
-    with cols[0]: st.success("🎬 **化學 YT 拍攝 3hr**")
-    with cols[1]: st.info("🎮 **自由娛樂時間**")
-else:
-    cols = st.columns(3)
-    with cols[0]: st.info("📖 **複習一週進度**")
-    with cols[1]: st.warning("🧪 **準備下週實驗**")
-    with cols[2]: st.success("😴 **休息充電**")
-
-# ⏱️ 零碎時間選單
+# --- 每日任務區 ---
 st.markdown("---")
-st.markdown("## ⏱️ 零碎時間 / AI 語言導師")
+col_t1, col_t2 = st.columns([5, 1])
+with col_t1: st.markdown("## 📅 今日任務 (AI Coach)")
+with col_t2: 
+    if st.button("🔄"): st.cache_data.clear(); st.rerun()
+
+ai_tasks = fetch_ai_daily_tasks(today_weekday)
+if not ai_tasks:
+    ai_tasks = [{"name": "任務規劃中...", "type": "系統", "desc": "請稍後再試", "style": "info"}]
+
+# 讀取已完成紀錄
+done_tasks_list = []
+if gc:
+    df_logs_check = load_data_from_gsheet("Logs")
+    if not df_logs_check.empty:
+        today_str = get_taiwan_time().strftime("%Y-%m-%d")
+        done_tasks_list = df_logs_check[df_logs_check['日期'] == today_str]['輸入'].tolist()
+
+cols = st.columns(len(ai_tasks))
+for i, task in enumerate(ai_tasks):
+    with cols[i]:
+        task_id = f"完成: {task['name']}"
+        is_done = any(task_id in log for log in done_tasks_list)
+        
+        if task['style'] == 'info': st.info(f"**{task['name']}**")
+        elif task['style'] == 'success': st.success(f"**{task['name']}**")
+        else: st.warning(f"**{task['name']}**")
+        st.caption(task['desc'])
+        
+        if is_done:
+            st.button("✅ 完成", key=f"done_{i}", disabled=True)
+        else:
+            if st.button("⬜ 挑戰", key=f"btn_{i}"):
+                save_log_to_gsheet([
+                    get_taiwan_time().strftime("%Y-%m-%d"),
+                    get_taiwan_time().strftime("%H:%M"),
+                    task['type'], task_id, "AI 任務 (XP+5)"
+                ])
+                st.toast("任務達成！")
+                time.sleep(1)
+                st.rerun()
+
+# --- 零碎時間 & 測驗區 ---
+st.markdown("---")
+st.markdown("## ⏱️ 零碎時間 / 語言特訓")
 
 if 'quiz_data' not in st.session_state: st.session_state.quiz_data = None
 if 'quiz_answered' not in st.session_state: st.session_state.quiz_answered = False
 if 'fragment_type' not in st.session_state: st.session_state.fragment_type = None
 
-col1, col2, col3, col4 = st.columns(4)
-
+c1, c2, c3, c4 = st.columns(4)
 def start_quiz(lang):
     st.session_state.fragment_type = "quiz"
     st.session_state.current_lang = lang
-    with st.spinner(f"正在召喚 AI 老師生成 {lang} 考題..."):
+    with st.spinner(f"生成 {lang} 題目中..."):
         data = fetch_ai_word_quiz(lang)
         if data:
             st.session_state.quiz_data = data
             st.session_state.quiz_answered = False
 
-with col1:
-    if st.button("🇯🇵 日文特訓", use_container_width=True): start_quiz("日文")
-with col2:
-    if st.button("🇺🇸 英文特訓", use_container_width=True): start_quiz("英文")
-with col3:
-    if st.button("🇩🇪 德語特訓", use_container_width=True): start_quiz("德語")
-with col4:
+with c1: 
+    if st.button("🇯🇵 日文", use_container_width=True): start_quiz("日文")
+with c2: 
+    if st.button("🇺🇸 英文", use_container_width=True): start_quiz("英文")
+with c3: 
+    if st.button("🇩🇪 德語", use_container_width=True): start_quiz("德語")
+with c4:
     if st.button("💻 深度工作", use_container_width=True): 
         st.session_state.fragment_type = "coding"
-        st.toast("🚀 進入深度工作模式！")
 
+# 測驗卡片顯示邏輯 (重點修復部分)
 if st.session_state.fragment_type == "quiz" and st.session_state.quiz_data:
     q = st.session_state.quiz_data
-    st.markdown(f"### 🎯 {st.session_state.current_lang} 隨堂測驗")
+    st.markdown(f"### 🎯 {st.session_state.current_lang} 測驗")
     
+    # 未作答前隱藏單字
+    if not st.session_state.quiz_answered:
+        d_word, d_read = "❓❓❓", "???"
+    else:
+        d_word, d_read = q['word'], q['reading']
+
     st.markdown(f"""
     <div class="quiz-card">
-        <h2 style="color:#4facfe; text-align:center;">{q['word']}</h2>
-        <p style="text-align:center; color:#aaa;">({q['reading']})</p>
+        <h2 style="color:#4facfe; text-align:center;">{d_word}</h2>
+        <p style="text-align:center; color:#aaa;">({d_read})</p>
         <hr style="border-color:#444;">
         <p style="font-size:1.1rem;"><b>Q: {q['quiz_question']}</b></p>
     </div>
     """, unsafe_allow_html=True)
     
     if not st.session_state.quiz_answered:
-        user_ans = st.radio("請選擇正確答案：", q['options'], index=None)
-        if st.button("送出答案"):
-            if user_ans:
+        ans = st.radio("答案：", q['options'], index=None)
+        if st.button("送出"):
+            if ans:
                 st.session_state.quiz_answered = True
-                correct_ans = q['options'][q['answer_index']]
-                if user_ans == correct_ans:
+                if ans == q['options'][q['answer_index']]:
                     st.balloons()
-                    st.success(f"✅ 答對了！ {q['word']} = {q['meaning']}")
-                    log_data = [
+                    st.success("✅ 正確！")
+                    save_log_to_gsheet([
                         get_taiwan_time().strftime("%Y-%m-%d"),
                         get_taiwan_time().strftime("%H:%M"),
-                        f"{st.session_state.current_lang} 測驗",
-                        f"學習單字: {q['word']}",
-                        "測驗通過 (水罐 XP+1)"
-                    ]
-                    save_log_to_gsheet(log_data)
-                    st.toast("💧 語言水罐已注入能量！")
+                        f"{st.session_state.current_lang}測驗",
+                        f"學習: {q['word']}", "通過 (XP+1)"
+                    ])
                 else:
-                    st.error(f"❌ 答錯了... 正確答案是：{correct_ans}")
+                    st.error(f"❌ 錯誤，答案是：{q['options'][q['answer_index']]}")
+                st.rerun()
     else:
-        st.markdown(f"""
-        <div style="background:#263238; padding:15px; border-radius:8px; margin-top:10px;">
-            <h4>📚 詳細解析</h4>
-            <ul>
-                <li><b>單字：</b>{q['word']} ({q['reading']})</li>
-                <li><b>意思：</b>{q['meaning']}</li>
-                <li><b>例句：</b>{q['example']}</li>
-                <li><b>中譯：</b>{q['example_meaning']}</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
+        st.info(f"💡 解析：{q['word']} = {q['meaning']} ({q['example']})")
         if st.button("下一題 ➡️"):
             start_quiz(st.session_state.current_lang)
             st.rerun()
 
 elif st.session_state.fragment_type == "coding":
-    st.info("💻 專注寫程式 / 論文 / 研究中...")
+    st.info("💻 專注模式開啟：請關閉通訊軟體，專注於程式碼或論文。")
 
-# 📊 季度 Tabs
+# --- 季度目標 & 論文 Tab ---
 st.markdown("---")
-st.markdown("## 📊 季度執行重點")
-current_quarter = get_current_quarter()
-tab1, tab2, tab3, tab4 = st.tabs(["Q1 基礎", "Q2 深化", "Q3 實戰", "Q4 衝刺"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["Q1 基礎", "Q2 深化", "Q3 實戰", "Q4 衝刺", "📰 每日論文"])
 
-with tab1:
-    st.markdown("#### 1-3月 (建立基礎)")
-    st.markdown("- 🇯🇵 複習 N5 文法, 背 N4 單字\n- 💻 Python 基礎 (Pandas)")
-    if current_quarter == 1: st.success("👈 **Current**")
-with tab2:
-    st.markdown("#### 4-6月 (技能深化)")
-    st.markdown("- 🇯🇵 N4 歷屆試題\n- 💻 寫第一個回測腳本")
-    if current_quarter == 2: st.success("👈 **Current**")
-with tab3:
-    st.markdown("#### 7-9月 (實戰驗收)")
-    st.markdown("- 🇯🇵 7 月日檢衝刺 / 檢討\n- 💻 模擬交易 (Paper Trading)\n- 🎬 YT 頻道優化")
-    if current_quarter == 3: st.success("👈 **Current**")
-with tab4:
-    st.markdown("#### 10-12月 (衝刺總結)")
-    st.markdown("- 🇯🇵 **12 月 JLPT N4 檢定**\n- 💻 實倉運作自動化交易\n- 🇩🇪 德語 A1/A2 檢定")
-    if current_quarter == 4: st.success("👈 **Current**")
+with tab1: st.markdown("- 🇯🇵 N5/N4\n- 💻 Python 基礎")
+with tab2: st.markdown("- 🇯🇵 N4 歷屆\n- 💻 回測腳本")
+with tab3: st.markdown("- 💻 模擬交易\n- 🎬 YT 頻道")
+with tab4: st.markdown("- 🇯🇵 **12月 N4 檢定**\n- 💻 實盤交易")
+with tab5:
+    st.markdown("### 🧪 最新化學/物理論文 (arXiv)")
+    if st.button("🔄 手動刷新論文"):
+        update_papers_if_new()
+        st.rerun()
+    
+    if gc:
+        df_papers = load_data_from_gsheet("Papers")
+        if not df_papers.empty:
+            df_papers = df_papers.sort_values(by="日期", ascending=False).head(10)
+            for _, row in df_papers.iterrows():
+                with st.expander(f"📄 {row.get('日期','')} | {row.get('標題','')}"):
+                    st.write(f"**作者:** {row.get('作者','')}")
+                    st.write(f"**摘要:** {row.get('摘要','')}")
+                    st.markdown(f"[🔗 閱讀原文]({row.get('連結','')})")
+        else:
+            st.info("尚無資料，請點擊刷新。")
 
-# ============================================================
-# 📝 學習紀錄
-# ============================================================
+# --- 學習紀錄 Input ---
 st.markdown("---")
 st.markdown("## 📝 學習紀錄")
-
-with st.form("learning_form", clear_on_submit=True):
-    col_input, col_output = st.columns(2)
-    with col_input:
-        input_text = st.text_area("📥 輸入 (學了什麼)", height=80)
-    with col_output:
-        output_text = st.text_area("📤 輸出 (應用/心得)", height=80)
-    
-    category = st.selectbox("類別", ["🧪 研究/化學", "💻 Python/交易", "🇯🇵 日文", "🇩🇪 德語", "📈 理財", "💪 健身", "🎬 YouTube", "🎯 其他"])
-    
-    if st.form_submit_button("💾 儲存紀錄至雲端"):
-        if input_text.strip():
-            tw_time = get_taiwan_time()
+with st.form("log_form", clear_on_submit=True):
+    c1, c2 = st.columns(2)
+    inp = c1.text_area("📥 輸入", height=80)
+    out = c2.text_area("📤 輸出", height=80)
+    cat = st.selectbox("類別", ["🧪 研究", "💻 程式", "🇯🇵 日文", "🇩🇪 德語", "📈 理財", "💪 健身", "🎬 YT"])
+    if st.form_submit_button("💾 儲存"):
+        if inp:
             save_log_to_gsheet([
-                tw_time.strftime("%Y-%m-%d"), 
-                tw_time.strftime("%H:%M"), 
-                category, 
-                input_text.strip(), 
-                output_text.strip()
+                get_taiwan_time().strftime("%Y-%m-%d"),
+                get_taiwan_time().strftime("%H:%M"),
+                cat, inp, out
             ])
-            st.toast("✅ 雲端儲存成功！", icon="☁️")
+            st.toast("儲存成功")
             st.rerun()
-        else:
-            st.warning("⚠️ 請至少填寫內容")
 
 # 顯示紀錄
 if gc:
     df_logs = load_data_from_gsheet("Logs")
     if not df_logs.empty:
-        view_tab1, view_tab2 = st.tabs(["🗓️ 本週戰情", "📋 歷史清單"])
-        with view_tab1:
-            render_weekly_view(df_logs)
-        with view_tab2:
-            st.dataframe(df_logs.sort_index(ascending=False).head(20), use_container_width=True)
-else:
-    st.info("⚠️ 請確認 Google Sheet 設定是否正確")
+        t1, t2 = st.tabs(["本週", "歷史"])
+        with t1: render_weekly_view(df_logs)
+        with t2: st.dataframe(df_logs.sort_index(ascending=False).head(20), use_container_width=True)
 
-st.markdown("---")
-st.caption("🧪 2026 PLAN | Powered by Gemini & Google Sheets")
+st.caption("🧪 2026 PLAN | Powered by Gemini")
+
 
 
 
