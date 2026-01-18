@@ -174,7 +174,7 @@ def fetch_ai_word_quiz(language):
     try:
         # ✅ 新版呼叫方式
         response = ai_client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt,
             config=types.GenerateContentConfig(
                 response_mime_type="application/json"
@@ -493,6 +493,7 @@ else:
 
 st.markdown("---")
 st.caption("🧪 2026 PLAN | Powered by Gemini & Google Sheets")
+
 
 
 
